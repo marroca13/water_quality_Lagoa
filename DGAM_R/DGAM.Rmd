@@ -1,0 +1,241 @@
+---
+title: "Florianopolis"
+author: "Pablo Almaraz"
+output:
+  html_document:
+    code_folding: show
+    df_print: paged
+    highlight: tango
+    number_sections: no
+    theme: united
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+<style type="text/css">
+
+body, td {
+   font-size: 15px;
+}
+code.r{
+  font-size: 12px;
+}
+pre {
+  font-size: 12px
+}
+</style>
+
+```{r setup, include=FALSE}
+if (!require(knitr)) install.packages('knitr')
+# knitr::opts_chunk$set(echo = T, message = F, warning = F, cache = F)
+knitr::opts_knit$set(root.dir = "./")
+library(tidyverse)
+library(readxl)
+library(mvgam)
+library(gratia)
+```
+
+
+```{r Load data, message=FALSE, warning=FALSE, include=FALSE}
+
+source('R/functions.R')
+
+#Load data
+# df <- read_excel("data-raw/Dados Historicos Lagoa_Pablo.xlsx")
+df <- read_excel("data-raw/Dados Historicos Lagoa_Pablo.xlsx")
+# df <- read_delim("data-raw/Dados Historicos Lagoa_Pablo.csv", escape_double = FALSE, trim_ws = TRUE)
+
+# Calcular el promedio mensual por cada región (no importa si faltan días en algunas regiones)
+filtered_data <- df %>%
+  group_by(Ano, mes) %>%
+  summarise_if(is.numeric, mean, na.rm = TRUE) %>%
+  ungroup() %>%
+  complete(Ano = 2001:2024, mes = 1:12) %>%
+  mutate_if(is.numeric, ~replace(., is.nan(.), NA)) %>%
+  filter(!(Ano == 2024 & mes > 3))
+
+glimpse(filtered_data)
+filtered_data$od = log(filtered_data$`OD%`+1)
+filtered_data$Cloro = log(filtered_data$`cloro ug.L`+1)
+filtered_data$temp = log(filtered_data$`Temp (oC)`+1)
+filtered_data$pH = log(filtered_data$`pH in`+1)
+
+# floRian_data <- filtered_data[, c('Ano','mes','Cloro', 'temp', 'pH', 'od')] %>%
+#   dplyr::mutate(time = seq(1,nrow(filtered_data),1)) %>%
+#   tidyr::pivot_longer(
+#     cols = c(Cloro),
+#     names_to = "series",
+#     values_to = "Cloro" ) %>%
+#   mutate(series = as.factor(series))
+#
+# model_data_train = model_data[1:(0.9*nrow(model_data)),]
+# model_data_test = model_data[(nrow(model_data_train)+1):nrow(model_data),]
+
+
+filtered_data %>% dplyr::select(Ano, mes, Cloro, temp, pH, od, TRIX) %>%
+
+  # mvgam requires a 'time' variable be present in the data to index
+  # the temporal observations. This is especially important when tracking
+  # multiple time series. In the Portal data, the 'moon' variable indexes the
+  # lunar monthly timestep of the trapping sessions
+  dplyr::mutate(time = seq(1,nrow(filtered_data),1)) %>%
+
+  # We can also provide a more informative name for the outcome variable, which
+  # is counts of the 'PP' species (Chaetodipus penicillatus) across all control
+  # plots
+  # dplyr::mutate(count = od) %>%
+
+  # The other requirement for mvgam is a 'series' variable, which needs to be a
+  # factor variable to index which time series each row in the data belongs to.
+  # Again, this is more useful when you have multiple time series in the data
+  dplyr::mutate(series = as.factor('Chlorophyll-a (mg/m3)')) %>%
+  # dplyr::mutate(series = as.factor('TRIX')) %>%
+  
+  # Select the variables of interest to keep in the model_data
+  dplyr::select(time, Ano, mes, series, Cloro, temp, pH, od, TRIX) %>% 
+  dplyr::rename('Chlorophyll-a (mg/m3)' = Cloro) -> model_data
+
+model_data %>%
+  # Create a 'year_fac' factor version of 'year'
+  dplyr::mutate(year_fac = factor(Ano),
+                month_fac = factor(mes)) -> model_data
+
+model_data_train = model_data[1:(0.9*nrow(model_data)),]
+model_data_test = model_data[(nrow(model_data_train)+1):nrow(model_data),]
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+plot_mvgam_series(data = model_data, series = 1, y = 'Chlorophyll-a (mg/m3)')
+```
+
+# Model
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# Rename for sanity...
+model_data$Cloro = model_data$`Chlorophyll-a (mg/m3)`
+
+model1 <- mvgam(Cloro ~
+                  #s(Ano) +
+                  #s(mes,
+                  te(mes, Ano,
+                  # Cyclic and marginal bases
+                  bs = c('cc', 'tp'),
+                  # bs = c('cc'),
+                  # Reasonable complexities
+                  k = c(8, 15)),
+                  # Define where the seasonal ends should 'join'
+                  knots = list(mes = c(0.5, 12.5)),
+                family = gaussian(),
+                data = model_data,
+                # data = model_data_train,
+                # newdata = model_data_test,
+                # noncentred = TRUE,
+                trend_model = 'GP')
+
+dates <- seq(from = as.Date("2001-01-01"), to = as.Date("2024-03-01"), by = "month")
+n_points <- length(dates)  # Total de puntos (279)
+# Seleccionar los índices correspondientes a enero de cada año
+year_labels <- format(dates, "%Y")  # Extraer los años de las fechas
+unique_years <- unique(year_labels)  # Años únicos
+indices <- match(unique_years, year_labels)  # Índices correspondientes a enero de cada año
+
+```
+
+# Results
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+hc <- hindcast(model1, type = 'link')
+plot(hc, hide_xlabels=T)
+
+# Añadir el eje x con etiquetas de años
+axis(1, at = indices, labels = unique_years)
+mtext("Year", side = 1, line = 3)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+plot_mvgam_fc_green(model1, hide_xlabels=T)
+
+# Añadir el eje x con etiquetas de años
+axis(1, at = indices, labels = unique_years)
+mtext("Year", side = 1, line = 3)
+
+```
+
+Temporal trend of chlorophyll-a in accorande to the observed hindcast.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+plot_mvgam_trend_green(model1, type = 'trend', hide_xlabels=T)
+
+# Añadir el eje x con etiquetas de años
+axis(1, at = indices, labels = unique_years)
+mtext("Year", side = 1, line = 3)
+
+```
+
+Adjusment of the tensorial model with estimated chlorophyll-a value as a response surface. The increase of chlorophyll-a from 2021 is clear, mainly between May and December.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+draw(model1$mgcv_model) + scale_x_continuous(breaks = 1:12,
+                       labels = c('J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D')) + 
+  labs(x = "Month", y = "Year", title = "Tensor product smooth of month and year") 
+```
+
+The conditional effects of chlorophyll-a abundance shows the insights from seasonality and annual trends. This figure shows the annual impact every 5 years, highlighting a change in the chlorophyll-a dynamic from 2021 onwards.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+conditional_effects(model1)
+
+```
+
+Residuals and pACF show no significant delays, showcasing the high fitting of the model.
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+plot(model1, type = 'residuals')
+
+```
+
+The posterior distribution of the estocastic model shows how the model is able to describe the trends in chlorophyll-a in the coastal lagoon.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+pp_check(object = model1, ndraws=1000, group = "series")
+
+```
+
+# Conclusions
+
+A change in chlorophyll-a dynamic and be infered from 2021, with an drastic increase of chlorophyll-a concentration and a more dynamic fluctuation until nowadays. This data showcase the impact of the massive wastewater discharge event, turning the ecosystem more unstable and vulnerable. 
+
+```{r eval=FALSE, include=FALSE}
+change <- Deriv(model1[["mgcv_model"]], n = nrow(model_data_train))
+plot.ts(change$mes$deriv)
+plot.ts(change$mes$se.deriv)
+m2.dci <- confint(change$gamModel, parm = 'te(mes,Ano)')
+#   p2 <- predict(fit_GAM, newdata = single_spat_point[[i]], type = "terms", se.fit = TRUE)
+#   m2.dsig <- signifD(p2$fit[,c("s(time)")],
+#                      d = m2.d[[Term]]$deriv,
+#                      m2.dci[[Term]]$upper,
+#                      m2.dci[[Term]]$lower)
+#   plot.Deriv(m2.d, sizer = TRUE)
+
+# Cargar librería
+library(ggplot2)
+df=cbind.data.frame(deriv=change$mes$deriv, se.deriv=change$mes$se.deriv)
+# Crear gráfico
+ggplot(df, aes(x = 1:nrow(df), y = deriv)) +
+  geom_line(color = "blue") + # Línea de la serie temporal de 'deriv'
+  geom_ribbon(aes(ymin = deriv - 1.983038*se.deriv, ymax = deriv + 1.983038*se.deriv), fill = "lightblue", alpha = 0.3) + # Área sombreada
+  labs(x = "Time", y = "Deriv", title = "Serie Temporal de Deriv con Intervalo de Error") +
+  theme_minimal()
+
+```
+
